@@ -1,0 +1,68 @@
+name: Build APK
+
+on:
+  push:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      # Распаковываем все .zip в репозитории (в том числе вложенные друг в друга),
+      # затем ищем settings.gradle(.kts) и берём ближайший к корню.
+      - name: Unpack project
+        run: |
+          mkdir -p _src
+          for ZIP in $(find . -maxdepth 1 -name '*.zip'); do
+            echo "Unpacking $ZIP"
+            unzip -q -o "$ZIP" -d _src
+          done
+          for i in 1 2 3 4 5; do
+            INNER=$(find _src -name '*.zip' | head -n1)
+            [ -z "$INNER" ] && break
+            echo "Unpacking nested $INNER"
+            unzip -q -o "$INNER" -d "$(dirname "$INNER")"
+            rm -f "$INNER"
+          done
+          SETTINGS=$(find . -maxdepth 4 -name 'settings.gradle*' -not -path './.git/*' \
+            | awk '{ print length($0), $0 }' | sort -n | head -n1 | cut -d' ' -f2-)
+          if [ -z "$SETTINGS" ]; then
+            echo "settings.gradle(.kts) not found" >&2
+            find . -maxdepth 4 -not -path './.git/*'
+            exit 1
+          fi
+          DIR=$(dirname "$SETTINGS")
+          echo "Project dir: $DIR"
+          echo "PROJECT_DIR=$DIR" >> "$GITHUB_ENV"
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - name: Accept SDK licenses and install platform
+        run: |
+          SDKM="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
+          yes | "$SDKM" --licenses > /dev/null || true
+          "$SDKM" "platforms;android-35" "build-tools;35.0.0"
+
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: 8.9
+
+      - name: Build debug APK
+        working-directory: ${{ env.PROJECT_DIR }}
+        run: gradle :app:assembleDebug --no-daemon --stacktrace
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: YouLauncher-debug-apk
+          path: ${{ env.PROJECT_DIR }}/app/build/outputs/apk/debug/*.apk
+          if-no-files-found: error
